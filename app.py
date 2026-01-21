@@ -1,6 +1,7 @@
 import streamlit as st
 import pandas as pd
-from pymongo import MongoClient
+from pymongo.mongo_client import MongoClient
+from pymongo.server_api import ServerApi
 from pymongo.errors import OperationFailure, ServerSelectionTimeoutError
 from bson.objectid import ObjectId
 from datetime import datetime
@@ -10,61 +11,66 @@ import io
 # --- CONFIGURATION ---
 st.set_page_config(page_title="HR Manager", layout="wide")
 
-# --- DATABASE CONNECTION ---
+# --- DATABASE CONNECTION (UPDATED) ---
 @st.cache_resource
 def init_connection():
     """
-    Connects to MongoDB. 
-    1. Looks for 'MONGO_URI' in Streamlit Secrets (Cloud).
-    2. Falls back to Localhost if no secrets found.
+    Connects to MongoDB using the robust ServerApi version 1.
     """
     try:
-        # Check if running on Streamlit Cloud
+        # 1. Get the Connection String (URI)
         if "MONGO_URI" in st.secrets:
-            client = MongoClient(st.secrets["MONGO_URI"], serverSelectionTimeoutMS=5000)
-            # Force a check to see if the password is correct immediately
-            client.server_info() 
-            return client
+            uri = st.secrets["MONGO_URI"]
+        else:
+            # Fallback for local testing if secrets file is missing
+            print("⚠️ Using Localhost (No Secrets Found)...")
+            uri = "mongodb://localhost:27017/"
+
+        # 2. Create a new client and connect to the server (Your Snippet)
+        client = MongoClient(uri, server_api=ServerApi('1'))
+
+        # 3. Send a ping to confirm a successful connection
+        client.admin.command('ping')
+        print("Pinged your deployment. You successfully connected to MongoDB!")
         
-        # Fallback for Local Testing
-        print("⚠️ No Secrets found. Trying Localhost...")
-        client = MongoClient("mongodb://localhost:27017/", serverSelectionTimeoutMS=5000)
         return client
 
     except OperationFailure:
-        st.error("🚨 **Authentication Failed!** The username or password in your Secrets is wrong.")
+        st.error("🚨 **Authentication Failed!** Please check your Username and Password in Streamlit Secrets.")
         st.stop()
     except ServerSelectionTimeoutError:
-        st.error("🚨 **Network Error!** Your IP address is not allowed. Check MongoDB Atlas Network Access (0.0.0.0/0).")
+        st.error("🚨 **Connection Failed!** Check your Network Access in Atlas. Ensure '0.0.0.0/0' is active.")
         st.stop()
     except Exception as e:
-        st.error(f"🚨 **Database Error:** {e}")
+        st.error(f"🚨 **Error:** {e}")
         return None
 
 client = init_connection()
 
-# Initialize Database & Collections
+# Initialize Collections
 if client:
-    db = client["EmployeeManagementDB"]
+    # We force the database name here to ensure we don't use the default 'test'
+    db_name = "EmployeeManagementDB"
+    # If the URI has a DB name, PyMongo uses it, otherwise we pick it explicitly
+    db = client[db_name]
+    
     employees_col = db["employees"]
     salaries_col = db["salaries"]
     
-    # Create Indexes (Safe to run multiple times)
+    # Create Indexes safely
     try:
         employees_col.create_index("email", unique=True)
         salaries_col.create_index([("employeeId", 1), ("month", 1)], unique=True)
-    except:
-        pass # Ignore index errors if they already exist
+    except Exception:
+        pass
 
 # --- UTILITY FUNCTIONS ---
 
 def serialize_doc(doc):
-    """Converts MongoDB ObjectId to string for DataFrames"""
     doc["_id"] = str(doc["_id"])
     return doc
 
 def to_excel(df):
-    """Converts DataFrame to Excel byte stream for download"""
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
         df.to_excel(writer, index=False, sheet_name='Sheet1')
@@ -103,7 +109,6 @@ def update_employee(obj_id, name, email, designation):
     )
 
 def delete_employee(obj_id):
-    # Soft Delete (Mark as Inactive)
     employees_col.update_one(
         {"_id": ObjectId(obj_id)},
         {"$set": {"status": "Inactive"}}
@@ -139,7 +144,6 @@ menu = st.sidebar.radio("Main Menu", ["👥 Employee Management", "💰 Salary P
 # 1. EMPLOYEE MANAGEMENT
 if menu == "👥 Employee Management":
     st.header("Employee Directory")
-    
     tab1, tab2 = st.tabs(["View / Edit Staff", "Add New Employee"])
     
     with tab1:
@@ -150,8 +154,6 @@ if menu == "👥 Employee Management":
             
             st.divider()
             st.subheader("Edit Employee Details")
-            
-            # Select Employee
             emp_dict = {e["employeeId"]: e["name"] for e in employees}
             selected_id = st.selectbox("Select Employee", list(emp_dict.keys()), 
                                      format_func=lambda x: f"{emp_dict[x]} ({x})")
@@ -170,7 +172,6 @@ if menu == "👥 Employee Management":
                         st.success("Updated!")
                         time.sleep(1)
                         st.rerun()
-                        
                     if b2.form_submit_button("Remove (Soft Delete)", type="primary"):
                         delete_employee(curr['_id'])
                         st.warning("Employee removed.")
@@ -187,7 +188,6 @@ if menu == "👥 Employee Management":
             name_in = c2.text_input("Full Name")
             email_in = st.text_input("Email")
             role_in = st.text_input("Designation")
-            
             if st.form_submit_button("Create Employee"):
                 if id_in and name_in:
                     ok, msg = create_employee(id_in, name_in, email_in, role_in)
@@ -199,27 +199,21 @@ if menu == "👥 Employee Management":
 # 2. SALARY PROCESSING
 elif menu == "💰 Salary Processing":
     st.header("Payroll")
-    
-    # Month Selector
     curr_month = datetime.now().strftime("%Y-%m")
     sel_month = st.sidebar.text_input("Payroll Month (YYYY-MM)", value=curr_month)
     
     col1, col2 = st.columns([1, 2])
-    
     with col1:
         st.info("Credit Salary")
         staff = get_employees()
         staff_map = {e["employeeId"]: e["name"] for e in staff}
-        
         with st.form("salary_form"):
             p_id = st.selectbox("Employee", staff_map.keys(), format_func=lambda x: staff_map[x])
             p_amt = st.number_input("Amount", min_value=0.0, step=500.0)
-            
             if st.form_submit_button("Credit"):
                 ok, msg = credit_salary(p_id, p_amt, sel_month)
                 if ok: st.success(msg)
                 else: st.error(msg)
-                
     with col2:
         st.caption(f"Transactions for {sel_month}")
         txns = get_salary_data(sel_month)
@@ -232,40 +226,23 @@ elif menu == "💰 Salary Processing":
 # 3. REPORTING & EXPORT
 elif menu == "📊 Reports & Export":
     st.header("Generate Reports")
-    
     report_month = st.text_input("Filter by Month (YYYY-MM)", value=datetime.now().strftime("%Y-%m"))
     
     if st.button("Load Data"):
         data = get_salary_data(report_month)
-        
         if data:
             df = pd.DataFrame(data)
-            # Filter clean columns
             export_df = df[["employeeId", "employeeName", "amount", "month", "creditedDate"]]
             
             st.success(f"Loaded {len(data)} records for {report_month}")
             st.dataframe(export_df, use_container_width=True)
-            
             st.write("### Download Options")
             c1, c2 = st.columns(2)
             
-            # CSV DOWNLOAD
             csv_data = export_df.to_csv(index=False).encode('utf-8')
-            c1.download_button(
-                label="📄 Download as CSV",
-                data=csv_data,
-                file_name=f"Salary_{report_month}.csv",
-                mime="text/csv"
-            )
+            c1.download_button("📄 Download as CSV", data=csv_data, file_name=f"Salary_{report_month}.csv", mime="text/csv")
             
-            # EXCEL DOWNLOAD
             excel_data = to_excel(export_df)
-            c2.download_button(
-                label="📗 Download as Excel",
-                data=excel_data,
-                file_name=f"Salary_{report_month}.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-            )
-            
+            c2.download_button("📗 Download as Excel", data=excel_data, file_name=f"Salary_{report_month}.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
         else:
-            st.warning("No data found for the selected month.")
+            st.warning("No data found.")
