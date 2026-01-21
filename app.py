@@ -200,7 +200,7 @@ def render_employee_management():
         data = fetch_employees()
         if data:
             df = pd.DataFrame(data)
-            # Professional Table Configuration
+            # Table Configuration
             st.dataframe(
                 df,
                 column_order=("employeeId", "name", "designation", "email", "status"),
@@ -219,9 +219,10 @@ def render_employee_management():
 
     with col_form:
         st.write("#### Actions")
-        action = st.radio("Select Action", ["Add New Employee", "Edit Existing"], label_visibility="collapsed")
+        # Tabs for cleaner action interface
+        tab_add, tab_edit = st.tabs(["Add New", "Edit / Disable"])
         
-        if action == "Add New Employee":
+        with tab_add:
             with st.form("new_hire_form"):
                 st.write("**Register New Employee**")
                 eid = st.text_input("Employee ID")
@@ -233,7 +234,7 @@ def render_employee_management():
                     if eid and name:
                         success, msg = register_employee(eid, name, email, role)
                         if success:
-                            st.toast(msg, icon=None)
+                            st.success(msg)
                             time.sleep(1)
                             st.rerun()
                         else:
@@ -241,15 +242,13 @@ def render_employee_management():
                     else:
                         st.warning("ID and Name are mandatory fields.")
         
-        elif action == "Edit Existing":
+        with tab_edit:
             st.write("**Update Records**")
-            # Create a dictionary for the dropdown
             if data:
                 options = {emp["employeeId"]: emp["name"] for emp in data}
                 selected_id = st.selectbox("Search Employee", options.keys(), format_func=lambda x: f"{options[x]} ({x})")
                 
                 if selected_id:
-                    # Find the selected object
                     current_emp = next(x for x in data if x["employeeId"] == selected_id)
                     
                     with st.form("update_form"):
@@ -258,15 +257,15 @@ def render_employee_management():
                         new_role = st.text_input("Designation", value=current_emp["designation"])
                         
                         c1, c2 = st.columns(2)
-                        if c1.form_submit_button("Update Details"):
+                        if c1.form_submit_button("Update"):
                             update_employee_record(current_emp["_id"], new_name, new_email, new_role)
-                            st.toast("Record updated successfully.")
+                            st.success("Updated.")
                             time.sleep(1)
                             st.rerun()
                             
-                        if c2.form_submit_button("Deactivate Profile"):
+                        if c2.form_submit_button("Deactivate"):
                             archive_employee(current_emp["_id"])
-                            st.toast("Employee deactivated.")
+                            st.warning("Deactivated.")
                             time.sleep(1)
                             st.rerun()
 
@@ -323,7 +322,7 @@ def render_payroll():
             st.info(f"No transactions found for {filter_month}")
 
 def render_reports():
-    """Renders the data export interface."""
+    """ data export interface."""
     st.subheader("Data Exports")
     
     st.markdown("Select a reporting period to download payroll data in your preferred format.")
@@ -335,7 +334,7 @@ def render_reports():
         
         if data:
             df = pd.DataFrame(data)
-            # Clean dataframe for export (remove technical fields)
+            # Clean dataframe for export
             clean_df = df[["employeeId", "employeeName", "amount", "month", "processedDate"]]
             
             st.success(f"Report generated: {len(df)} records found.")
@@ -369,16 +368,13 @@ def render_reports():
 # --- MAIN EXECUTION FLOW ---
 
 def main():
-    # Sidebar Navigation (Professional Style)
+    # Sidebar Navigation
     st.sidebar.title("Admin Console")
-    
-    # Using a selectbox for navigation is cleaner than radio buttons for admin panels
+    st.sidebar.write("---")
     nav_options = ["Dashboard", "Employees", "Payroll", "Reports"]
-    selection = st.sidebar.selectbox("Navigate to", nav_options)
+    selection = st.sidebar.radio("Go to", nav_options, label_visibility="collapsed")
     
-    st.sidebar.divider()
-    st.sidebar.caption("System Status: Online")
-    st.sidebar.caption(f"Server Time: {datetime.now().strftime('%H:%M')}")
+    st.sidebar.write("---")
 
     # Routing logic
     if selection == "Dashboard":
