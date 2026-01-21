@@ -1,57 +1,77 @@
 import streamlit as st
 import pandas as pd
 from pymongo import MongoClient
+from pymongo.errors import OperationFailure, ServerSelectionTimeoutError
 from bson.objectid import ObjectId
 from datetime import datetime
 import time
-import io  # Required for handling in-memory files
+import io
 
-# CONFIGURATION
+# --- CONFIGURATION ---
 st.set_page_config(page_title="HR Manager", layout="wide")
 
-# DATABASE CONNECTION
+# --- DATABASE CONNECTION ---
 @st.cache_resource
 def init_connection():
+    """
+    Connects to MongoDB. 
+    1. Looks for 'MONGO_URI' in Streamlit Secrets (Cloud).
+    2. Falls back to Localhost if no secrets found.
+    """
     try:
-        # Check for Cloud Secrets
+        # Check if running on Streamlit Cloud
         if "MONGO_URI" in st.secrets:
-            return MongoClient(st.secrets["MONGO_URI"])
+            client = MongoClient(st.secrets["MONGO_URI"], serverSelectionTimeoutMS=5000)
+            # Force a check to see if the password is correct immediately
+            client.server_info() 
+            return client
         
-        # Fallback to Localhost
-        print("Secrets not found. Using Localhost...")
-        return MongoClient("mongodb://localhost:27017/")
+        # Fallback for Local Testing
+        print("⚠️ No Secrets found. Trying Localhost...")
+        client = MongoClient("mongodb://localhost:27017/", serverSelectionTimeoutMS=5000)
+        return client
+
+    except OperationFailure:
+        st.error("🚨 **Authentication Failed!** The username or password in your Secrets is wrong.")
+        st.stop()
+    except ServerSelectionTimeoutError:
+        st.error("🚨 **Network Error!** Your IP address is not allowed. Check MongoDB Atlas Network Access (0.0.0.0/0).")
+        st.stop()
     except Exception as e:
-        st.error(f"DB Connection Error: {e}")
+        st.error(f"🚨 **Database Error:** {e}")
         return None
 
 client = init_connection()
 
-# Initialize Collections
+# Initialize Database & Collections
 if client:
     db = client["EmployeeManagementDB"]
     employees_col = db["employees"]
     salaries_col = db["salaries"]
     
-    # Indexes 
-    employees_col.create_index("email", unique=True)
-    salaries_col.create_index([("employeeId", 1), ("month", 1)], unique=True)
+    # Create Indexes (Safe to run multiple times)
+    try:
+        employees_col.create_index("email", unique=True)
+        salaries_col.create_index([("employeeId", 1), ("month", 1)], unique=True)
+    except:
+        pass # Ignore index errors if they already exist
 
-# UTILITY FUNCTIONS
+# --- UTILITY FUNCTIONS ---
 
 def serialize_doc(doc):
-    """Fixes 'ObjectId not serializable' error for DataFrames"""
+    """Converts MongoDB ObjectId to string for DataFrames"""
     doc["_id"] = str(doc["_id"])
     return doc
 
 def to_excel(df):
-    """Converts DataFrame to Excel byte stream"""
+    """Converts DataFrame to Excel byte stream for download"""
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
         df.to_excel(writer, index=False, sheet_name='Sheet1')
     output.seek(0)
     return output
 
-# BACKEND LOGIC 
+# --- BACKEND LOGIC ---
 
 def create_employee(emp_id, name, email, designation):
     try:
@@ -83,7 +103,7 @@ def update_employee(obj_id, name, email, designation):
     )
 
 def delete_employee(obj_id):
-    # Soft Delete
+    # Soft Delete (Mark as Inactive)
     employees_col.update_one(
         {"_id": ObjectId(obj_id)},
         {"$set": {"status": "Inactive"}}
@@ -110,14 +130,14 @@ def credit_salary(emp_id, amount, month_str):
 def get_salary_data(month_str):
     return [serialize_doc(doc) for doc in salaries_col.find({"month": month_str})]
 
-# FRONTEND UI
+# --- FRONTEND UI ---
 
-st.title("Employee & Payroll System")
+st.title("🏢 Employee & Payroll System")
 
-menu = st.sidebar.radio("Main Menu", ["Employee Management", " Salary Processing", "Reports & Export"])
+menu = st.sidebar.radio("Main Menu", ["👥 Employee Management", "💰 Salary Processing", "📊 Reports & Export"])
 
 # 1. EMPLOYEE MANAGEMENT
-if menu == "Employee Management":
+if menu == "👥 Employee Management":
     st.header("Employee Directory")
     
     tab1, tab2 = st.tabs(["View / Edit Staff", "Add New Employee"])
@@ -177,7 +197,7 @@ if menu == "Employee Management":
                     st.warning("ID and Name are required.")
 
 # 2. SALARY PROCESSING
-elif menu == " Salary Processing":
+elif menu == "💰 Salary Processing":
     st.header("Payroll")
     
     # Month Selector
@@ -209,8 +229,8 @@ elif menu == " Salary Processing":
         else:
             st.write("No transactions yet.")
 
-# 3. REPORTING & EXPORT 
-elif menu == " Reports & Export":
+# 3. REPORTING & EXPORT
+elif menu == "📊 Reports & Export":
     st.header("Generate Reports")
     
     report_month = st.text_input("Filter by Month (YYYY-MM)", value=datetime.now().strftime("%Y-%m"))
@@ -232,7 +252,7 @@ elif menu == " Reports & Export":
             # CSV DOWNLOAD
             csv_data = export_df.to_csv(index=False).encode('utf-8')
             c1.download_button(
-                label=" Download as CSV",
+                label="📄 Download as CSV",
                 data=csv_data,
                 file_name=f"Salary_{report_month}.csv",
                 mime="text/csv"
@@ -241,7 +261,7 @@ elif menu == " Reports & Export":
             # EXCEL DOWNLOAD
             excel_data = to_excel(export_df)
             c2.download_button(
-                label=" Download as Excel",
+                label="📗 Download as Excel",
                 data=excel_data,
                 file_name=f"Salary_{report_month}.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
