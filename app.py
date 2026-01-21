@@ -19,20 +19,15 @@ st.set_page_config(
 @st.cache_resource
 def get_db_connection():
     """
-    Establishes a connection to MongoDB using enterprise standards (ServerApi 1).
-    Checks Streamlit Secrets first, falls back to local environment for development.
+    Establishes a connection to MongoDB using enterprise standards.
     """
     try:
         if "MONGO_URI" in st.secrets:
             uri = st.secrets["MONGO_URI"]
         else:
-            # Fallback for local development
             uri = "mongodb://localhost:27017/"
 
-        # Initialize client with the stable API version 1
         client = MongoClient(uri, server_api=ServerApi('1'), serverSelectionTimeoutMS=5000)
-        
-        # Verify connection immediately (Fail fast strategy)
         client.admin.command('ping')
         return client
 
@@ -49,7 +44,6 @@ def get_db_connection():
 # --- DATA LAYER (CRUD OPERATIONS) ---
 
 def fetch_employees(active_only=True):
-    """Retrieves employee records from the database."""
     client = get_db_connection()
     if not client: return []
     
@@ -57,8 +51,6 @@ def fetch_employees(active_only=True):
     query = {"status": "Active"} if active_only else {}
     
     cursor = db["employees"].find(query)
-    
-    # Convert ObjectId to string for UI compatibility
     data = []
     for doc in cursor:
         doc["_id"] = str(doc["_id"])
@@ -66,11 +58,9 @@ def fetch_employees(active_only=True):
     return data
 
 def register_employee(emp_id, name, email, role):
-    """Creates a new employee record."""
     client = get_db_connection()
     db = client["EmployeeManagementDB"]
     
-    # Validation: Check if ID already exists
     if db["employees"].find_one({"employeeId": emp_id}):
         return False, "Employee ID is already in use."
     
@@ -92,10 +82,8 @@ def register_employee(emp_id, name, email, role):
         return False, f"Database error: {str(e)}"
 
 def update_employee_record(uid, name, email, role):
-    """Updates existing employee details."""
     client = get_db_connection()
     db = client["EmployeeManagementDB"]
-    
     try:
         db["employees"].update_one(
             {"_id": ObjectId(uid)},
@@ -106,10 +94,8 @@ def update_employee_record(uid, name, email, role):
         return False
 
 def archive_employee(uid):
-    """Soft deletes an employee (sets status to Inactive)."""
     client = get_db_connection()
     db = client["EmployeeManagementDB"]
-    
     try:
         db["employees"].update_one(
             {"_id": ObjectId(uid)},
@@ -120,11 +106,9 @@ def archive_employee(uid):
         return False
 
 def process_payroll_transaction(emp_id, amount, month):
-    """Records a salary payment."""
     client = get_db_connection()
     db = client["EmployeeManagementDB"]
     
-    # Fetch employee name for historical immutability
     employee = db["employees"].find_one({"employeeId": emp_id})
     if not employee:
         return False, "Employee record not found."
@@ -146,7 +130,6 @@ def process_payroll_transaction(emp_id, amount, month):
         return False, f"Error: {str(e)}"
 
 def fetch_payroll_history(month=None):
-    """Fetches salary history, optionally filtered by month."""
     client = get_db_connection()
     db = client["EmployeeManagementDB"]
     
@@ -159,7 +142,6 @@ def fetch_payroll_history(month=None):
         data.append(doc)
     return data
 
-# --- UTILITY: FILE EXPORT ---
 def generate_excel(dataframe):
     buffer = io.BytesIO()
     with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
@@ -170,37 +152,28 @@ def generate_excel(dataframe):
 # --- UI COMPONENTS ---
 
 def render_dashboard():
-    """Renders the main KPI dashboard."""
     st.header("Executive Overview")
-    
-    # Fetch data for metrics
     employees = fetch_employees()
     current_month = datetime.now().strftime("%Y-%m")
     payroll = fetch_payroll_history(current_month)
     
-    # Calculate Metrics
     total_staff = len(employees)
     total_payout = sum(p['amount'] for p in payroll)
     
-    # Layout Metrics
     col1, col2, col3 = st.columns(3)
     col1.metric("Total Active Employees", total_staff)
     col2.metric("Payroll Processed (Current Month)", f"${total_payout:,.2f}")
     col3.metric("Current Period", current_month)
-    
     st.divider()
 
 def render_employee_management():
-    """Renders the employee directory and action forms."""
     st.subheader("Employee Directory")
-    
     col_table, col_form = st.columns([2, 1])
     
     with col_table:
         data = fetch_employees()
         if data:
             df = pd.DataFrame(data)
-            # Table Configuration
             st.dataframe(
                 df,
                 column_order=("employeeId", "name", "designation", "email", "status"),
@@ -209,17 +182,16 @@ def render_employee_management():
                     "name": "Full Name",
                     "designation": "Role",
                     "email": "Contact Email",
-                    "status": st.column_config.TextColumn("Status", help="Current employment status")
+                    "status": st.column_config.TextColumn("Status")
                 },
                 use_container_width=True,
                 hide_index=True
             )
         else:
-            st.info("No records found in the system.")
+            st.info("No records found.")
 
     with col_form:
         st.write("#### Actions")
-        # Tabs for cleaner action interface
         tab_add, tab_edit = st.tabs(["Add New", "Edit / Disable"])
         
         with tab_add:
@@ -240,7 +212,7 @@ def render_employee_management():
                         else:
                             st.error(msg)
                     else:
-                        st.warning("ID and Name are mandatory fields.")
+                        st.warning("ID and Name are mandatory.")
         
         with tab_edit:
             st.write("**Update Records**")
@@ -250,7 +222,6 @@ def render_employee_management():
                 
                 if selected_id:
                     current_emp = next(x for x in data if x["employeeId"] == selected_id)
-                    
                     with st.form("update_form"):
                         new_name = st.text_input("Full Name", value=current_emp["name"])
                         new_email = st.text_input("Email", value=current_emp["email"])
@@ -262,7 +233,6 @@ def render_employee_management():
                             st.success("Updated.")
                             time.sleep(1)
                             st.rerun()
-                            
                         if c2.form_submit_button("Deactivate"):
                             archive_employee(current_emp["_id"])
                             st.warning("Deactivated.")
@@ -270,24 +240,19 @@ def render_employee_management():
                             st.rerun()
 
 def render_payroll():
-    """Renders the payroll processing interface."""
     st.subheader("Payroll Management")
-    
     col_input, col_history = st.columns([1, 2])
     
     with col_input:
         st.markdown("#### Process Transaction")
         employees = fetch_employees()
-        
         if not employees:
-            st.warning("No active employees to pay.")
+            st.warning("No active employees.")
         else:
             with st.form("payroll_form"):
                 month_selector = st.text_input("Billing Period (YYYY-MM)", value=datetime.now().strftime("%Y-%m"))
-                
                 options = {emp["employeeId"]: emp["name"] for emp in employees}
                 selected_emp = st.selectbox("Beneficiary", options.keys(), format_func=lambda x: options[x])
-                
                 amount = st.number_input("Net Salary Amount", min_value=0.0, step=100.0)
                 
                 if st.form_submit_button("Confirm Transaction", type="primary"):
@@ -302,7 +267,6 @@ def render_payroll():
     with col_history:
         st.markdown("#### Transaction History")
         filter_month = st.text_input("Filter History by Month", value=datetime.now().strftime("%Y-%m"), key="hist_filter")
-        
         history = fetch_payroll_history(filter_month)
         if history:
             df = pd.DataFrame(history)
@@ -322,68 +286,76 @@ def render_payroll():
             st.info(f"No transactions found for {filter_month}")
 
 def render_reports():
-    """ data export interface."""
     st.subheader("Data Exports")
-    
-    st.markdown("Select a reporting period to download payroll data in your preferred format.")
-    
+    st.markdown("Select a reporting period to download payroll data.")
     target_month = st.text_input("Reporting Period (YYYY-MM)", value=datetime.now().strftime("%Y-%m"))
     
     if st.button("Generate Report"):
         data = fetch_payroll_history(target_month)
-        
         if data:
             df = pd.DataFrame(data)
-            # Clean dataframe for export
             clean_df = df[["employeeId", "employeeName", "amount", "month", "processedDate"]]
             
             st.success(f"Report generated: {len(df)} records found.")
             st.write("---")
-            
             col_csv, col_excel = st.columns(2)
             
-            # CSV Button
             csv_buffer = clean_df.to_csv(index=False).encode('utf-8')
-            col_csv.download_button(
-                label="Download CSV Format",
-                data=csv_buffer,
-                file_name=f"Payroll_Report_{target_month}.csv",
-                mime="text/csv",
-                use_container_width=True
-            )
+            col_csv.download_button("Download CSV Format", csv_buffer, f"Payroll_{target_month}.csv", "text/csv", use_container_width=True)
             
-            # Excel Button
             excel_buffer = generate_excel(clean_df)
-            col_excel.download_button(
-                label="Download Excel Format",
-                data=excel_buffer,
-                file_name=f"Payroll_Report_{target_month}.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                use_container_width=True
-            )
-            
+            col_excel.download_button("Download Excel Format", excel_buffer, f"Payroll_{target_month}.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", use_container_width=True)
         else:
-            st.warning("No data available for the selected period.")
+            st.warning("No data available.")
 
-# --- MAIN EXECUTION FLOW ---
+# --- MAIN NAVIGATION CONTROLLER ---
 
 def main():
-    # Sidebar Navigation
-    st.sidebar.title("Admin Console")
-    st.sidebar.write("---")
-    nav_options = ["Dashboard", "Employees", "Payroll", "Reports"]
-    selection = st.sidebar.radio("Go to", nav_options, label_visibility="collapsed")
-    
-    st.sidebar.write("---")
+    # Initialize Session State for Page Navigation
+    if 'current_page' not in st.session_state:
+        st.session_state.current_page = "Dashboard"
 
-    # Routing logic
-    if selection == "Dashboard":
+    def navigate_to(page):
+        st.session_state.current_page = page
+        st.rerun()
+
+    # SIDEBAR: Professional Button-Based Menu
+    with st.sidebar:
+        st.title("Admin Console")
+        st.write("") # Spacer
+
+        # Navigation Buttons (Active button gets 'primary' style, inactive gets 'secondary')
+        
+        if st.button("Dashboard", 
+                     use_container_width=True, 
+                     type="primary" if st.session_state.current_page == "Dashboard" else "secondary"):
+            navigate_to("Dashboard")
+            
+        if st.button("Employees", 
+                     use_container_width=True, 
+                     type="primary" if st.session_state.current_page == "Employees" else "secondary"):
+            navigate_to("Employees")
+            
+        if st.button("Payroll", 
+                     use_container_width=True, 
+                     type="primary" if st.session_state.current_page == "Payroll" else "secondary"):
+            navigate_to("Payroll")
+            
+        if st.button("Reports", 
+                     use_container_width=True, 
+                     type="primary" if st.session_state.current_page == "Reports" else "secondary"):
+            navigate_to("Reports")
+        
+        st.write("---")
+
+    # MAIN CONTENT ROUTING
+    if st.session_state.current_page == "Dashboard":
         render_dashboard()
-    elif selection == "Employees":
+    elif st.session_state.current_page == "Employees":
         render_employee_management()
-    elif selection == "Payroll":
+    elif st.session_state.current_page == "Payroll":
         render_payroll()
-    elif selection == "Reports":
+    elif st.session_state.current_page == "Reports":
         render_reports()
 
 if __name__ == "__main__":
