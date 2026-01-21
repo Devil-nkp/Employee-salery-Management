@@ -8,241 +8,387 @@ from datetime import datetime
 import time
 import io
 
-# --- CONFIGURATION ---
-st.set_page_config(page_title="HR Manager", layout="wide")
+# --- APP CONFIGURATION ---
+st.set_page_config(
+    page_title="Employee Management System",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
 
-# --- DATABASE CONNECTION (UPDATED) ---
+# --- DATABASE CONNECTION HANDLER ---
 @st.cache_resource
-def init_connection():
+def get_db_connection():
     """
-    Connects to MongoDB using the robust ServerApi version 1.
+    Establishes a connection to MongoDB using enterprise standards (ServerApi 1).
+    Checks Streamlit Secrets first, falls back to local environment for development.
     """
     try:
-        # 1. Get the Connection String (URI)
         if "MONGO_URI" in st.secrets:
             uri = st.secrets["MONGO_URI"]
         else:
-            # Fallback for local testing if secrets file is missing
-            print("⚠️ Using Localhost (No Secrets Found)...")
+            # Fallback for local development
             uri = "mongodb://localhost:27017/"
 
-        # 2. Create a new client and connect to the server (Your Snippet)
-        client = MongoClient(uri, server_api=ServerApi('1'))
-
-        # 3. Send a ping to confirm a successful connection
-        client.admin.command('ping')
-        print("Pinged your deployment. You successfully connected to MongoDB!")
+        # Initialize client with the stable API version 1
+        client = MongoClient(uri, server_api=ServerApi('1'), serverSelectionTimeoutMS=5000)
         
+        # Verify connection immediately (Fail fast strategy)
+        client.admin.command('ping')
         return client
 
     except OperationFailure:
-        st.error("🚨 **Authentication Failed!** Please check your Username and Password in Streamlit Secrets.")
+        st.error("System Error: Authentication failed. Please verify database credentials.")
         st.stop()
     except ServerSelectionTimeoutError:
-        st.error("🚨 **Connection Failed!** Check your Network Access in Atlas. Ensure '0.0.0.0/0' is active.")
+        st.error("Network Error: Unable to reach database. Verify network allow-list (0.0.0.0/0).")
         st.stop()
     except Exception as e:
-        st.error(f"🚨 **Error:** {e}")
+        st.error(f"Critical Error: {str(e)}")
         return None
 
-client = init_connection()
+# --- DATA LAYER (CRUD OPERATIONS) ---
 
-# Initialize Collections
-if client:
-    # We force the database name here to ensure we don't use the default 'test'
-    db_name = "EmployeeManagementDB"
-    # If the URI has a DB name, PyMongo uses it, otherwise we pick it explicitly
-    db = client[db_name]
+def fetch_employees(active_only=True):
+    """Retrieves employee records from the database."""
+    client = get_db_connection()
+    if not client: return []
     
-    employees_col = db["employees"]
-    salaries_col = db["salaries"]
-    
-    # Create Indexes safely
-    try:
-        employees_col.create_index("email", unique=True)
-        salaries_col.create_index([("employeeId", 1), ("month", 1)], unique=True)
-    except Exception:
-        pass
-
-# --- UTILITY FUNCTIONS ---
-
-def serialize_doc(doc):
-    doc["_id"] = str(doc["_id"])
-    return doc
-
-def to_excel(df):
-    output = io.BytesIO()
-    with pd.ExcelWriter(output, engine='openpyxl') as writer:
-        df.to_excel(writer, index=False, sheet_name='Sheet1')
-    output.seek(0)
-    return output
-
-# --- BACKEND LOGIC ---
-
-def create_employee(emp_id, name, email, designation):
-    try:
-        if employees_col.find_one({"employeeId": emp_id}):
-            return False, "Employee ID already exists."
-        
-        employees_col.insert_one({
-            "employeeId": emp_id,
-            "name": name,
-            "email": email,
-            "designation": designation,
-            "status": "Active",
-            "joinedDate": datetime.now()
-        })
-        return True, "Employee onboarded successfully."
-    except Exception as e:
-        if "duplicate key" in str(e):
-            return False, "Email already registered."
-        return False, f"Error: {e}"
-
-def get_employees(active_only=True):
+    db = client["EmployeeManagementDB"]
     query = {"status": "Active"} if active_only else {}
-    return [serialize_doc(doc) for doc in employees_col.find(query)]
+    
+    cursor = db["employees"].find(query)
+    
+    # Convert ObjectId to string for UI compatibility
+    data = []
+    for doc in cursor:
+        doc["_id"] = str(doc["_id"])
+        data.append(doc)
+    return data
 
-def update_employee(obj_id, name, email, designation):
-    employees_col.update_one(
-        {"_id": ObjectId(obj_id)},
-        {"$set": {"name": name, "email": email, "designation": designation}}
-    )
-
-def delete_employee(obj_id):
-    employees_col.update_one(
-        {"_id": ObjectId(obj_id)},
-        {"$set": {"status": "Inactive"}}
-    )
-
-def credit_salary(emp_id, amount, month_str):
+def register_employee(emp_id, name, email, role):
+    """Creates a new employee record."""
+    client = get_db_connection()
+    db = client["EmployeeManagementDB"]
+    
+    # Validation: Check if ID already exists
+    if db["employees"].find_one({"employeeId": emp_id}):
+        return False, "Employee ID is already in use."
+    
+    new_record = {
+        "employeeId": emp_id,
+        "name": name,
+        "email": email,
+        "designation": role,
+        "status": "Active",
+        "joinedDate": datetime.now()
+    }
+    
     try:
-        emp = employees_col.find_one({"employeeId": emp_id})
-        if not emp: return False, "Employee not found."
-        
-        salaries_col.insert_one({
-            "employeeId": emp_id,
-            "employeeName": emp["name"],
-            "amount": float(amount),
-            "month": month_str,
-            "creditedDate": datetime.now()
-        })
-        return True, f"Salary credited for {emp['name']}."
+        db["employees"].insert_one(new_record)
+        return True, "Employee registered successfully."
     except Exception as e:
         if "duplicate key" in str(e):
-            return False, "Duplicate payment prevented for this month."
-        return False, str(e)
+            return False, "This email address is already registered."
+        return False, f"Database error: {str(e)}"
 
-def get_salary_data(month_str):
-    return [serialize_doc(doc) for doc in salaries_col.find({"month": month_str})]
-
-# --- FRONTEND UI ---
-
-st.title("🏢 Employee & Payroll System")
-
-menu = st.sidebar.radio("Main Menu", ["👥 Employee Management", "💰 Salary Processing", "📊 Reports & Export"])
-
-# 1. EMPLOYEE MANAGEMENT
-if menu == "👥 Employee Management":
-    st.header("Employee Directory")
-    tab1, tab2 = st.tabs(["View / Edit Staff", "Add New Employee"])
+def update_employee_record(uid, name, email, role):
+    """Updates existing employee details."""
+    client = get_db_connection()
+    db = client["EmployeeManagementDB"]
     
-    with tab1:
-        employees = get_employees()
-        if employees:
-            df = pd.DataFrame(employees)
-            st.dataframe(df[["employeeId", "name", "email", "designation", "status"]], use_container_width=True)
-            
-            st.divider()
-            st.subheader("Edit Employee Details")
-            emp_dict = {e["employeeId"]: e["name"] for e in employees}
-            selected_id = st.selectbox("Select Employee", list(emp_dict.keys()), 
-                                     format_func=lambda x: f"{emp_dict[x]} ({x})")
-            
-            if selected_id:
-                curr = next(e for e in employees if e["employeeId"] == selected_id)
-                with st.form("edit_emp"):
-                    c1, c2 = st.columns(2)
-                    n_name = c1.text_input("Name", curr['name'])
-                    n_email = c2.text_input("Email", curr['email'])
-                    n_role = st.text_input("Designation", curr['designation'])
-                    
-                    b1, b2 = st.columns([1, 4])
-                    if b1.form_submit_button("Update"):
-                        update_employee(curr['_id'], n_name, n_email, n_role)
-                        st.success("Updated!")
-                        time.sleep(1)
-                        st.rerun()
-                    if b2.form_submit_button("Remove (Soft Delete)", type="primary"):
-                        delete_employee(curr['_id'])
-                        st.warning("Employee removed.")
-                        time.sleep(1)
-                        st.rerun()
-        else:
-            st.info("No active employees found.")
-            
-    with tab2:
-        st.subheader("Onboard New Staff")
-        with st.form("add_emp"):
-            c1, c2 = st.columns(2)
-            id_in = c1.text_input("Employee ID", placeholder="EMP001")
-            name_in = c2.text_input("Full Name")
-            email_in = st.text_input("Email")
-            role_in = st.text_input("Designation")
-            if st.form_submit_button("Create Employee"):
-                if id_in and name_in:
-                    ok, msg = create_employee(id_in, name_in, email_in, role_in)
-                    if ok: st.success(msg)
-                    else: st.error(msg)
-                else:
-                    st.warning("ID and Name are required.")
+    try:
+        db["employees"].update_one(
+            {"_id": ObjectId(uid)},
+            {"$set": {"name": name, "email": email, "designation": role}}
+        )
+        return True
+    except Exception:
+        return False
 
-# 2. SALARY PROCESSING
-elif menu == "💰 Salary Processing":
-    st.header("Payroll")
-    curr_month = datetime.now().strftime("%Y-%m")
-    sel_month = st.sidebar.text_input("Payroll Month (YYYY-MM)", value=curr_month)
+def archive_employee(uid):
+    """Soft deletes an employee (sets status to Inactive)."""
+    client = get_db_connection()
+    db = client["EmployeeManagementDB"]
     
-    col1, col2 = st.columns([1, 2])
-    with col1:
-        st.info("Credit Salary")
-        staff = get_employees()
-        staff_map = {e["employeeId"]: e["name"] for e in staff}
-        with st.form("salary_form"):
-            p_id = st.selectbox("Employee", staff_map.keys(), format_func=lambda x: staff_map[x])
-            p_amt = st.number_input("Amount", min_value=0.0, step=500.0)
-            if st.form_submit_button("Credit"):
-                ok, msg = credit_salary(p_id, p_amt, sel_month)
-                if ok: st.success(msg)
-                else: st.error(msg)
-    with col2:
-        st.caption(f"Transactions for {sel_month}")
-        txns = get_salary_data(sel_month)
-        if txns:
-            st.dataframe(pd.DataFrame(txns)[["employeeId", "employeeName", "amount", "creditedDate"]], 
-                         use_container_width=True)
-        else:
-            st.write("No transactions yet.")
+    try:
+        db["employees"].update_one(
+            {"_id": ObjectId(uid)},
+            {"$set": {"status": "Inactive"}}
+        )
+        return True
+    except Exception:
+        return False
 
-# 3. REPORTING & EXPORT
-elif menu == "📊 Reports & Export":
-    st.header("Generate Reports")
-    report_month = st.text_input("Filter by Month (YYYY-MM)", value=datetime.now().strftime("%Y-%m"))
+def process_payroll_transaction(emp_id, amount, month):
+    """Records a salary payment."""
+    client = get_db_connection()
+    db = client["EmployeeManagementDB"]
     
-    if st.button("Load Data"):
-        data = get_salary_data(report_month)
+    # Fetch employee name for historical immutability
+    employee = db["employees"].find_one({"employeeId": emp_id})
+    if not employee:
+        return False, "Employee record not found."
+    
+    transaction = {
+        "employeeId": emp_id,
+        "employeeName": employee["name"],
+        "amount": float(amount),
+        "month": month,
+        "processedDate": datetime.now()
+    }
+    
+    try:
+        db["salaries"].insert_one(transaction)
+        return True, "Transaction processed successfully."
+    except Exception as e:
+        if "duplicate key" in str(e):
+            return False, f"Salary for {month} has already been processed for this employee."
+        return False, f"Error: {str(e)}"
+
+def fetch_payroll_history(month=None):
+    """Fetches salary history, optionally filtered by month."""
+    client = get_db_connection()
+    db = client["EmployeeManagementDB"]
+    
+    query = {"month": month} if month else {}
+    cursor = db["salaries"].find(query)
+    
+    data = []
+    for doc in cursor:
+        doc["_id"] = str(doc["_id"])
+        data.append(doc)
+    return data
+
+# --- UTILITY: FILE EXPORT ---
+def generate_excel(dataframe):
+    buffer = io.BytesIO()
+    with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
+        dataframe.to_excel(writer, index=False, sheet_name='Report')
+    buffer.seek(0)
+    return buffer
+
+# --- UI COMPONENTS ---
+
+def render_dashboard():
+    """Renders the main KPI dashboard."""
+    st.header("Executive Overview")
+    
+    # Fetch data for metrics
+    employees = fetch_employees()
+    current_month = datetime.now().strftime("%Y-%m")
+    payroll = fetch_payroll_history(current_month)
+    
+    # Calculate Metrics
+    total_staff = len(employees)
+    total_payout = sum(p['amount'] for p in payroll)
+    
+    # Layout Metrics
+    col1, col2, col3 = st.columns(3)
+    col1.metric("Total Active Employees", total_staff)
+    col2.metric("Payroll Processed (Current Month)", f"${total_payout:,.2f}")
+    col3.metric("Current Period", current_month)
+    
+    st.divider()
+
+def render_employee_management():
+    """Renders the employee directory and action forms."""
+    st.subheader("Employee Directory")
+    
+    col_table, col_form = st.columns([2, 1])
+    
+    with col_table:
+        data = fetch_employees()
         if data:
             df = pd.DataFrame(data)
-            export_df = df[["employeeId", "employeeName", "amount", "month", "creditedDate"]]
-            
-            st.success(f"Loaded {len(data)} records for {report_month}")
-            st.dataframe(export_df, use_container_width=True)
-            st.write("### Download Options")
-            c1, c2 = st.columns(2)
-            
-            csv_data = export_df.to_csv(index=False).encode('utf-8')
-            c1.download_button("📄 Download as CSV", data=csv_data, file_name=f"Salary_{report_month}.csv", mime="text/csv")
-            
-            excel_data = to_excel(export_df)
-            c2.download_button("📗 Download as Excel", data=excel_data, file_name=f"Salary_{report_month}.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+            # Professional Table Configuration
+            st.dataframe(
+                df,
+                column_order=("employeeId", "name", "designation", "email", "status"),
+                column_config={
+                    "employeeId": "ID",
+                    "name": "Full Name",
+                    "designation": "Role",
+                    "email": "Contact Email",
+                    "status": st.column_config.TextColumn("Status", help="Current employment status")
+                },
+                use_container_width=True,
+                hide_index=True
+            )
         else:
-            st.warning("No data found.")
+            st.info("No records found in the system.")
+
+    with col_form:
+        st.write("#### Actions")
+        action = st.radio("Select Action", ["Add New Employee", "Edit Existing"], label_visibility="collapsed")
+        
+        if action == "Add New Employee":
+            with st.form("new_hire_form"):
+                st.write("**Register New Employee**")
+                eid = st.text_input("Employee ID")
+                name = st.text_input("Full Name")
+                email = st.text_input("Email Address")
+                role = st.text_input("Designation")
+                
+                if st.form_submit_button("Save Record", type="primary"):
+                    if eid and name:
+                        success, msg = register_employee(eid, name, email, role)
+                        if success:
+                            st.toast(msg, icon=None)
+                            time.sleep(1)
+                            st.rerun()
+                        else:
+                            st.error(msg)
+                    else:
+                        st.warning("ID and Name are mandatory fields.")
+        
+        elif action == "Edit Existing":
+            st.write("**Update Records**")
+            # Create a dictionary for the dropdown
+            if data:
+                options = {emp["employeeId"]: emp["name"] for emp in data}
+                selected_id = st.selectbox("Search Employee", options.keys(), format_func=lambda x: f"{options[x]} ({x})")
+                
+                if selected_id:
+                    # Find the selected object
+                    current_emp = next(x for x in data if x["employeeId"] == selected_id)
+                    
+                    with st.form("update_form"):
+                        new_name = st.text_input("Full Name", value=current_emp["name"])
+                        new_email = st.text_input("Email", value=current_emp["email"])
+                        new_role = st.text_input("Designation", value=current_emp["designation"])
+                        
+                        c1, c2 = st.columns(2)
+                        if c1.form_submit_button("Update Details"):
+                            update_employee_record(current_emp["_id"], new_name, new_email, new_role)
+                            st.toast("Record updated successfully.")
+                            time.sleep(1)
+                            st.rerun()
+                            
+                        if c2.form_submit_button("Deactivate Profile"):
+                            archive_employee(current_emp["_id"])
+                            st.toast("Employee deactivated.")
+                            time.sleep(1)
+                            st.rerun()
+
+def render_payroll():
+    """Renders the payroll processing interface."""
+    st.subheader("Payroll Management")
+    
+    col_input, col_history = st.columns([1, 2])
+    
+    with col_input:
+        st.markdown("#### Process Transaction")
+        employees = fetch_employees()
+        
+        if not employees:
+            st.warning("No active employees to pay.")
+        else:
+            with st.form("payroll_form"):
+                month_selector = st.text_input("Billing Period (YYYY-MM)", value=datetime.now().strftime("%Y-%m"))
+                
+                options = {emp["employeeId"]: emp["name"] for emp in employees}
+                selected_emp = st.selectbox("Beneficiary", options.keys(), format_func=lambda x: options[x])
+                
+                amount = st.number_input("Net Salary Amount", min_value=0.0, step=100.0)
+                
+                if st.form_submit_button("Confirm Transaction", type="primary"):
+                    success, msg = process_payroll_transaction(selected_emp, amount, month_selector)
+                    if success:
+                        st.success(msg)
+                        time.sleep(1)
+                        st.rerun()
+                    else:
+                        st.error(msg)
+
+    with col_history:
+        st.markdown("#### Transaction History")
+        filter_month = st.text_input("Filter History by Month", value=datetime.now().strftime("%Y-%m"), key="hist_filter")
+        
+        history = fetch_payroll_history(filter_month)
+        if history:
+            df = pd.DataFrame(history)
+            st.dataframe(
+                df,
+                column_order=("processedDate", "employeeName", "amount", "month"),
+                column_config={
+                    "processedDate": st.column_config.DatetimeColumn("Date", format="D MMM YYYY, h:mm a"),
+                    "employeeName": "Employee",
+                    "amount": st.column_config.NumberColumn("Amount", format="$%.2f"),
+                    "month": "Period"
+                },
+                use_container_width=True,
+                hide_index=True
+            )
+        else:
+            st.info(f"No transactions found for {filter_month}")
+
+def render_reports():
+    """Renders the data export interface."""
+    st.subheader("Data Exports")
+    
+    st.markdown("Select a reporting period to download payroll data in your preferred format.")
+    
+    target_month = st.text_input("Reporting Period (YYYY-MM)", value=datetime.now().strftime("%Y-%m"))
+    
+    if st.button("Generate Report"):
+        data = fetch_payroll_history(target_month)
+        
+        if data:
+            df = pd.DataFrame(data)
+            # Clean dataframe for export (remove technical fields)
+            clean_df = df[["employeeId", "employeeName", "amount", "month", "processedDate"]]
+            
+            st.success(f"Report generated: {len(df)} records found.")
+            st.write("---")
+            
+            col_csv, col_excel = st.columns(2)
+            
+            # CSV Button
+            csv_buffer = clean_df.to_csv(index=False).encode('utf-8')
+            col_csv.download_button(
+                label="Download CSV Format",
+                data=csv_buffer,
+                file_name=f"Payroll_Report_{target_month}.csv",
+                mime="text/csv",
+                use_container_width=True
+            )
+            
+            # Excel Button
+            excel_buffer = generate_excel(clean_df)
+            col_excel.download_button(
+                label="Download Excel Format",
+                data=excel_buffer,
+                file_name=f"Payroll_Report_{target_month}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True
+            )
+            
+        else:
+            st.warning("No data available for the selected period.")
+
+# --- MAIN EXECUTION FLOW ---
+
+def main():
+    # Sidebar Navigation (Professional Style)
+    st.sidebar.title("Admin Console")
+    
+    # Using a selectbox for navigation is cleaner than radio buttons for admin panels
+    nav_options = ["Dashboard", "Employees", "Payroll", "Reports"]
+    selection = st.sidebar.selectbox("Navigate to", nav_options)
+    
+    st.sidebar.divider()
+    st.sidebar.caption("System Status: Online")
+    st.sidebar.caption(f"Server Time: {datetime.now().strftime('%H:%M')}")
+
+    # Routing logic
+    if selection == "Dashboard":
+        render_dashboard()
+    elif selection == "Employees":
+        render_employee_management()
+    elif selection == "Payroll":
+        render_payroll()
+    elif selection == "Reports":
+        render_reports()
+
+if __name__ == "__main__":
+    main()
